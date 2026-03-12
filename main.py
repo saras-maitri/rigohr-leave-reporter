@@ -126,8 +126,7 @@ def send_webhook(reports: dict, sender: str, report_date: str) -> None:
         lines.append(f"*{leave_type}* ({len(entries)})")
         for entry in entries:
             reason = f" — {entry['reason']}" if entry["reason"] else ""
-            status = f" [{entry['status']}]" if entry.get("status") else ""
-            lines.append(f"  • {entry['name']}{reason}{status}")
+            lines.append(f"  • {entry['name']}{reason}")
         lines.append("")
 
     message = "\n".join(lines)
