@@ -1,0 +1,164 @@
+import argparse
+import csv
+import os
+from collections import defaultdict
+from datetime import date
+
+import requests
+
+from attendance_api import fetch_team_attendance
+from auth import authenticate
+from leave_api import fetch_leave_requests
+
+
+TENANT_ID = "42747636-a5f8-4451-8339-471c9d521ea4"
+def _get_webhook_url() -> str:
+    url = os.getenv("GCHAT_WEBHOOK", "")
+    if not url:
+        raise SystemExit("Set GCHAT_WEBHOOK in .env")
+    return url
+
+
+# --- Step 1: Authenticate ---
+
+
+def login(rigo_id: str, password: str) -> requests.Session:
+    return authenticate(rigo_id, password)
+
+
+# --- Step 2: Fetch latest data ---
+
+
+def _format_date(date_str: str) -> str:
+    if not date_str:
+        return ""
+    return date_str.split("T")[0]
+
+
+def _get_status(item: dict) -> str:
+    status = item.get("Status", "")
+    if status == "Request":
+        return "Pending"
+    if status in ("Approved", "Completed"):
+        return "Approved"
+    return status
+
+
+def fetch_reports(session: requests.Session, report_date: str) -> dict:
+    raw_leaves = fetch_leave_requests(
+        session, TENANT_ID, start_date=report_date, end_date=report_date
+    )
+    leave_records = [
+        {
+            "name": item["Requester"],
+            "leave_type": item["LeaveName"],
+            "from_date": _format_date(item.get("FromDateEng", "")),
+            "to_date": _format_date(item.get("ToDateEng", "")),
+            "status": _get_status(item),
+            "reason": item["Reason"],
+        }
+        for item in raw_leaves
+    ]
+
+    raw_attendance = fetch_team_attendance(session, TENANT_ID, report_date)
+    attendance_records = [
+        {
+            "name": item["Name"],
+            "department": item.get("Department", ""),
+            "is_present": item.get("IsPresent", False),
+        }
+        for item in raw_attendance
+    ]
+
+    return {"leaves": leave_records, "attendance": attendance_records}
+
+
+# --- Step 3: Write to CSV ---
+
+
+def write_csvs(reports: dict, report_date: str) -> None:
+    _write_csv(
+        reports["leaves"],
+        "leave_requests.csv",
+        ["name", "leave_type", "from_date", "to_date", "status", "reason"],
+    )
+    print(f"Wrote {len(reports['leaves'])} leave requests to leave_requests.csv")
+
+    attendance_file = f"attendance-{report_date}.csv"
+    _write_csv(
+        reports["attendance"],
+        attendance_file,
+        ["name", "department", "is_present"],
+    )
+    print(f"Wrote {len(reports['attendance'])} attendance records to {attendance_file}")
+
+
+def _write_csv(records: list[dict], filepath: str, fieldnames: list[str]) -> None:
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+
+
+# --- Step 4: Send webhook ---
+
+
+def send_webhook(reports: dict, sender: str, report_date: str) -> None:
+    todays_leaves = [
+        r for r in reports["leaves"]
+        if r["leave_type"] and r["from_date"] <= report_date <= r["to_date"]
+    ]
+
+    if not todays_leaves:
+        print(f"No leave requests for {report_date}")
+        return
+
+    grouped = defaultdict(list)
+    for r in todays_leaves:
+        grouped[r["leave_type"]].append(r)
+
+    lines = [f"*Leave Report for {report_date}*\n_From: {sender}_\n"]
+    for leave_type, entries in grouped.items():
+        lines.append(f"*{leave_type}* ({len(entries)})")
+        for entry in entries:
+            reason = f" — {entry['reason']}" if entry["reason"] else ""
+            status = f" [{entry['status']}]" if entry.get("status") else ""
+            lines.append(f"  • {entry['name']}{reason}{status}")
+        lines.append("")
+
+    message = "\n".join(lines)
+    print(f"\n{message}")
+
+    response = requests.post(_get_webhook_url(), json={"text": message})
+    response.raise_for_status()
+    print("Sent to Google Chat")
+
+
+# --- Entrypoint ---
+
+
+def main():
+    parser = argparse.ArgumentParser(description="RigoHR Leave Report")
+    parser.add_argument(
+        "--date", type=str, default=None,
+        help="Report date in YYYY-MM-DD format (default: today)",
+    )
+    args = parser.parse_args()
+    report_date = args.date or date.today().isoformat()
+
+    rigo_id = os.getenv("RigoId")
+    password = os.getenv("password")
+    if not rigo_id or not password:
+        raise SystemExit("Set RigoId and password in .env")
+
+    session = login(rigo_id, password)
+    reports = fetch_reports(session, report_date)
+    write_csvs(reports, report_date)
+    send_webhook(reports, sender=rigo_id, report_date=report_date)
+
+
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    main()

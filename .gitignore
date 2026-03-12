@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.csv
+*.swp
+.omc/
+.claude/
+apis.txt
+cookies.json
