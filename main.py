@@ -11,7 +11,11 @@ from auth import authenticate
 from leave_api import fetch_leave_requests
 
 
-TENANT_ID = "42747636-a5f8-4451-8339-471c9d521ea4"
+def _get_tenant_id() -> str:
+    tid = os.getenv("TENANT_ID", "")
+    if not tid:
+        raise SystemExit("Set TENANT_ID in .env")
+    return tid
 def _get_webhook_url() -> str:
     url = os.getenv("GCHAT_WEBHOOK", "")
     if not url:
@@ -44,9 +48,9 @@ def _get_status(item: dict) -> str:
     return status
 
 
-def fetch_reports(session: requests.Session, report_date: str) -> dict:
+def fetch_reports(session: requests.Session, tenant_id: str, report_date: str) -> dict:
     raw_leaves = fetch_leave_requests(
-        session, TENANT_ID, start_date=report_date, end_date=report_date
+        session, tenant_id, start_date=report_date, end_date=report_date
     )
     leave_records = [
         {
@@ -60,7 +64,7 @@ def fetch_reports(session: requests.Session, report_date: str) -> dict:
         for item in raw_leaves
     ]
 
-    raw_attendance = fetch_team_attendance(session, TENANT_ID, report_date)
+    raw_attendance = fetch_team_attendance(session, tenant_id, report_date)
     attendance_records = [
         {
             "name": item["Name"],
@@ -151,8 +155,10 @@ def main():
     if not rigo_id or not password:
         raise SystemExit("Set RigoId and password in .env")
 
+    tenant_id = _get_tenant_id()
+
     session = login(rigo_id, password)
-    reports = fetch_reports(session, report_date)
+    reports = fetch_reports(session, tenant_id, report_date)
     write_csvs(reports, report_date)
     send_webhook(reports, sender=rigo_id, report_date=report_date)
 
