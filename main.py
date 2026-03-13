@@ -11,11 +11,6 @@ from auth import authenticate
 from leave_api import fetch_leave_requests
 
 
-def _get_tenant_id() -> str:
-    tid = os.getenv("TENANT_ID", "")
-    if not tid:
-        raise SystemExit("Set TENANT_ID in .env")
-    return tid
 def _get_webhook_url() -> str:
     url = os.getenv("GCHAT_WEBHOOK", "")
     if not url:
@@ -26,7 +21,7 @@ def _get_webhook_url() -> str:
 # --- Step 1: Authenticate ---
 
 
-def login(rigo_id: str, password: str) -> requests.Session:
+def login(rigo_id: str, password: str) -> tuple[requests.Session, str]:
     return authenticate(rigo_id, password)
 
 
@@ -154,9 +149,7 @@ def main():
     if not rigo_id or not password:
         raise SystemExit("Set RigoId and password in .env")
 
-    tenant_id = _get_tenant_id()
-
-    session = login(rigo_id, password)
+    session, tenant_id = login(rigo_id, password)
     reports = fetch_reports(session, tenant_id, report_date)
     write_csvs(reports, report_date)
     send_webhook(reports, sender=rigo_id, report_date=report_date)
