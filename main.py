@@ -59,7 +59,6 @@ def fetch_reports(session: requests.Session, tenant_id: str, report_date: str) -
             "from_date": _format_date(item.get("FromDateEng", "")),
             "to_date": _format_date(item.get("ToDateEng", "")),
             "status": _get_status(item),
-            "reason": item["Reason"],
         }
         for item in raw_leaves
     ]
@@ -84,7 +83,7 @@ def write_csvs(reports: dict, report_date: str) -> None:
     _write_csv(
         reports["leaves"],
         "leave_requests.csv",
-        ["name", "leave_type", "from_date", "to_date", "status", "reason"],
+        ["name", "leave_type", "from_date", "to_date", "status"],
     )
     print(f"Wrote {len(reports['leaves'])} leave requests to leave_requests.csv")
 
@@ -125,8 +124,7 @@ def send_webhook(reports: dict, sender: str, report_date: str) -> None:
     for leave_type, entries in grouped.items():
         lines.append(f"*{leave_type}* ({len(entries)})")
         for entry in entries:
-            reason = f" — {entry['reason']}" if entry["reason"] else ""
-            lines.append(f"  • {entry['name']}{reason}")
+            lines.append(f"  • {entry['name']}")
         lines.append("")
 
     message = "\n".join(lines)
