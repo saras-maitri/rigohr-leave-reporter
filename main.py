@@ -11,7 +11,7 @@ from attendance_api import fetch_team_attendance
 from auth import authenticate
 from leave_api import fetch_leave_requests
 
-LEAVE_CSV_FIELDS = ["name", "leave_type", "from_date", "to_date", "status", "reason", "sent"]
+DEDUP_CSV_FIELDS = ["name", "leave_type", "day_type", "from_date", "to_date", "status", "sent"]
 
 
 def _get_tenant_id() -> str:
@@ -51,21 +51,37 @@ def _get_status(item: dict) -> str:
     return status
 
 
+def _flatten_raw_leave(item: dict) -> dict:
+    """Flatten a raw API leave record for CSV export, formatting dates."""
+    flat = {}
+    for key, value in item.items():
+        if key == "TotalRow":
+            continue
+        if isinstance(value, str) and "T" in value and value.count("-") >= 2:
+            flat[key] = _format_date(value)
+        else:
+            flat[key] = value
+    return flat
+
+
 def fetch_reports(session: requests.Session, tenant_id: str, report_date: str) -> dict:
+    from datetime import date, timedelta
+    lookback_start = (date.fromisoformat(report_date) - timedelta(days=30)).isoformat()
     raw_leaves = fetch_leave_requests(
-        session, tenant_id, start_date=report_date, end_date=report_date
+        session, tenant_id, start_date=lookback_start, end_date=report_date
     )
     leave_records = [
         {
             "name": item["Requester"],
             "leave_type": item["LeaveName"],
+            "day_type": item.get("LeaveDayType", ""),
             "from_date": _format_date(item.get("FromDateEng", "")),
             "to_date": _format_date(item.get("ToDateEng", "")),
             "status": _get_status(item),
-            "reason": item["Reason"],
         }
         for item in raw_leaves
     ]
+    raw_leave_records = [_flatten_raw_leave(item) for item in raw_leaves]
 
     raw_attendance = fetch_team_attendance(session, tenant_id, report_date)
     attendance_records = [
@@ -77,7 +93,7 @@ def fetch_reports(session: requests.Session, tenant_id: str, report_date: str) -
         for item in raw_attendance
     ]
 
-    return {"leaves": leave_records, "attendance": attendance_records}
+    return {"leaves": leave_records, "raw_leaves": raw_leave_records, "attendance": attendance_records}
 
 
 # --- Step 3: State-aware CSV management ---
@@ -107,7 +123,7 @@ def _read_existing_leaves(csv_path: Path) -> dict[str, dict]:
 
 def _write_leave_csv(csv_path: Path, records: list[dict]) -> None:
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=LEAVE_CSV_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=DEDUP_CSV_FIELDS)
         writer.writeheader()
         writer.writerows(records)
 
@@ -156,6 +172,79 @@ def write_attendance_csv(reports: dict, report_date: str) -> None:
     print(f"Wrote {len(reports['attendance'])} attendance records to {attendance_file}")
 
 
+# --- Step 4b: Write daily raw leave CSV (all API fields) ---
+
+
+def write_daily_leave_csv(reports: dict, report_date: str) -> None:
+    """Write all raw API fields for today's leaves to a daily CSV."""
+    raw_leaves = reports.get("raw_leaves", [])
+    if not raw_leaves:
+        print(f"No raw leave records to write for {report_date}")
+        return
+
+    fieldnames = list(raw_leaves[0].keys())
+    daily_path = Path(f"leave-raw-{report_date}.csv")
+    with open(daily_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(raw_leaves)
+    print(f"Wrote {len(raw_leaves)} raw leave records to {daily_path}")
+
+
+# --- Step 4c: Append to monthly leave report ---
+
+
+def _monthly_csv_path(report_date: str) -> Path:
+    """Return path like leave-monthly-2026-03.csv from a YYYY-MM-DD date."""
+    year_month = report_date[:7]  # YYYY-MM
+    return Path(f"leave-monthly-{year_month}.csv")
+
+
+def _monthly_leave_key(record: dict) -> str:
+    """Unique key for monthly dedup: name + leave_type + from + to."""
+    return f"{record.get('Requester', '')}|{record.get('LeaveName', '')}|{record.get('FromDateEng', '')}|{record.get('ToDateEng', '')}"
+
+
+def append_monthly_leaves(reports: dict, report_date: str) -> None:
+    """Append new leave records to the monthly CSV, deduplicating by key."""
+    raw_leaves = reports.get("raw_leaves", [])
+    if not raw_leaves:
+        return
+
+    monthly_path = _monthly_csv_path(report_date)
+    fieldnames = list(raw_leaves[0].keys())
+
+    # Read existing monthly records for dedup
+    existing_keys = set()
+    existing_rows = []
+    if monthly_path.exists():
+        with open(monthly_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            existing_fieldnames = reader.fieldnames or []
+            for row in reader:
+                existing_keys.add(_monthly_leave_key(row))
+                existing_rows.append(row)
+            # Merge fieldnames in case API returns new fields
+            for fn in existing_fieldnames:
+                if fn not in fieldnames:
+                    fieldnames.append(fn)
+
+    new_count = 0
+    for record in raw_leaves:
+        key = _monthly_leave_key(record)
+        if key not in existing_keys:
+            existing_keys.add(key)
+            existing_rows.append(record)
+            new_count += 1
+
+    with open(monthly_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(existing_rows)
+
+    print(f"Monthly {monthly_path}: {new_count} new, {len(existing_rows)} total")
+
+
 # --- Step 5: Send webhook ---
 
 
@@ -176,8 +265,8 @@ def send_webhook(leaves_to_send: list[dict], sender: str, report_date: str, mode
     for leave_type, entries in grouped.items():
         lines.append(f"*{leave_type}* ({len(entries)})")
         for entry in entries:
-            reason = f" — {entry['reason']}" if entry["reason"] else ""
-            lines.append(f"  • {entry['name']}{reason}")
+            day_type = f" ({entry['day_type']})" if entry.get("day_type") else ""
+            lines.append(f"  • {entry['name']}{day_type}")
         lines.append("")
 
     message = "\n".join(lines)
@@ -216,6 +305,8 @@ def main():
 
     leaves_to_send = process_leaves(reports, report_date, args.mode)
     write_attendance_csv(reports, report_date)
+    write_daily_leave_csv(reports, report_date)
+    append_monthly_leaves(reports, report_date)
     send_webhook(leaves_to_send, sender=rigo_id, report_date=report_date, mode=args.mode)
 
 
