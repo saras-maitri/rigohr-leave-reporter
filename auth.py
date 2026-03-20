@@ -83,10 +83,10 @@ def _activate_session(
         raise RuntimeError(f"SSO callback failed: {data}")
 
 
-def authenticate(rigo_id: str, password: str) -> requests.Session:
-    """Full authentication flow. Returns a session ready for API calls."""
+def authenticate(rigo_id: str, password: str) -> tuple[requests.Session, str]:
+    """Full authentication flow. Returns (session, tenant_id)."""
     session = _create_session()
     _iam_login(session, rigo_id, password)
     code, tenant_id = _sso_exchange(session)
     _activate_session(session, code, tenant_id)
-    return session
+    return session, tenant_id
