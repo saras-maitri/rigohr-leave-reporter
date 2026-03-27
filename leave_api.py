@@ -1,4 +1,5 @@
 import math
+from datetime import date, timedelta
 
 import requests
 
@@ -70,7 +71,10 @@ def fetch_leave_requests(
 ) -> list[dict]:
     """Fetch both pending and approved leave requests, deduplicated by RequestId."""
     pending = fetch_pending_requests(session, tenant_id)
-    approved = fetch_approved_requests(session, tenant_id, start_date, end_date)
+    # Use a 30-day lookback so multi-day leaves starting before the
+    # report date are not missed by the API's EventStartDate filter.
+    lookback = (date.fromisoformat(start_date) - timedelta(days=30)).isoformat()
+    approved = fetch_approved_requests(session, tenant_id, lookback, end_date)
 
     seen = set()
     combined = []
